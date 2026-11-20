@@ -1,0 +1,11 @@
+{{- if and $.Values.gwcManage (hasKey $.Values.geoserver "sharedGWC") (not $.Values.geoserver.sharedGWC ) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $.Release.Name }}-gwcmanage-configmap-crontab-file
+  annotations:
+    field.cattle.io/description: geoserver scripts
+binaryData:
+  crontab: >- 
+{{ include "gwcmanage.crontab" . | b64enc | indent 4 }}
+{{- end }}

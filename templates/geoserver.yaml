@@ -31,7 +31,7 @@ spec:
       initContainers:
         - name: {{ $.Release.Name }}-geoserver-init
           image: {{ $.Values.geoserver.image }}
-          imagePullPolicy: Always
+          imagePullPolicy: {{ $.Values.geoserver.imagePullPolicy | default "Always" }}
           command:
             - /geoserver/bin/init_geoserver
           env:
@@ -56,6 +56,9 @@ spec:
             {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            privileged: false
             capabilities:
               drop:
                 - ALL
@@ -161,7 +164,7 @@ spec:
             failureThreshold: 1
             successThreshold: 1
             initialDelaySeconds: {{ $livenessProbe.initialDelaySeconds | default 10 }}
-            timeoutSeconds: {{ ceil (addf ($.Values.geoserver.liveCheckTimeout | default 0.5) 1) | int}}
+            timeoutSeconds: {{ ceil (addf ($.Values.geoserver.liveCheckTimeout | default 0.5) 60) | int}}
             periodSeconds: {{ $livenessProbe.periodSeconds | default 10 }}
             exec:
               command:
@@ -172,6 +175,9 @@ spec:
           {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            privileged: false
             capabilities:
               drop:
                 - ALL
@@ -195,9 +201,18 @@ spec:
               mountPath: "/geoserver/bin"
             {{- if gt (len ($.Values.geoserver.customsettings | default list)) 0  }}
             {{- range $config := $.Values.geoserver.customsettings }}
+            {{- if and (hasKey $config "overwrite") (not $config.overwrite) }}
             - name: geoserver-customsettings
               mountPath: "/geoserver/customsettings/{{$config.mountPath}}"
               subPath: {{$config.name}}
+            {{- end }}  
+            {{- end }}  
+            {{- range $config := $.Values.geoserver.customsettings }}
+            {{- if or (not (hasKey $config "overwrite")) $config.overwrite }}
+            - name: geoserver-customsettings-readonly
+              mountPath: "/geoserver/customsettings-readonly/{{$config.mountPath}}"
+              subPath: {{$config.name}}
+            {{- end }}  
             {{- end }}  
             {{- end }}  
             {{- if $.Values.geoserverHealthcheck }}
@@ -228,6 +243,7 @@ spec:
       {{- if hasKey $.Values.geoserver "groupid" }}
       securityContext:
         fsGroup: {{ $.Values.geoserver.groupid }}
+        fsGroupChangePolicy: "OnRootMismatch"
       {{- end }}
       restartPolicy: Always
       schedulerName: default-scheduler
@@ -260,6 +276,11 @@ spec:
       - name: geoserver-customsettings
         configMap:
           name: {{ $.Release.Name }}-geoserver-configmap-customsettings
+          optional: false
+          defaultMode: 0777
+      - name: geoserver-customsettings-readonly
+        configMap:
+          name: {{ $.Release.Name }}-geoserver-configmap-customsettings-readonly
           optional: false
           defaultMode: 0777
       {{- end }}

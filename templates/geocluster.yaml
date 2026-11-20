@@ -1,6 +1,17 @@
 {{- if and $.Values.geoserver ($.Values.geoserver.clustering | default false) }}
+
+{{- $nfsCount := 0 }}
+{{- if and $.Values.geoserver.volumes $.Values.geoserver.volumes.pvcs }}
+{{- range $name,$config := $.Values.geoserver.volumes.pvcs | default dict }}
+  {{- if and $config.storageClassName (hasPrefix "nfs-" $config.storageClassName) (not (empty $config.mounts))}}
+      {{ $nfsCount = add1 $nfsCount}}
+  {{- end }}
+{{- end }}
+{{- end }}
+
 {{- $startupProbe :=  $.Values.geoserver.startupProbe | default dict }}
 {{- $livenessProbe :=  $.Values.geoserver.livenessProbe | default dict }}
+{{- $readinessProbe :=  $.Values.geoserver.readinessProbe | default dict }}
 {{- $adminServerIsWorker :=  true }}
 {{- if hasKey $.Values.geoserver "adminServerIsWorker" }}
   {{- $adminServerIsWorker =  $.Values.geoserver.adminServerIsWorker }}
@@ -41,10 +52,19 @@ spec:
             workload.user.cattle.io/workloadselector: apps.{{ $.Release.Namespace}}-{{ $.Release.Name }}-geocluster-workers
       {{- end }}
       {{- end }}
+      {{- if or (hasKey $.Values.geoserver "imagepull") (and $.Values.gwcManage (hasKey $.Values.geoserver "sharedGWC") (not $.Values.geoserver.sharedGWC) $.Values.gwcManage.imagepull) }}
+      imagePullSecrets:
+        {{- if hasKey $.Values.geoserver "imagepull" }}
+        - name: {{ $.Release.Name }}-geoserver-secret-imagepull
+        {{- end }}
+        {{- if and $.Values.gwcManage (hasKey $.Values.geoserver "sharedGWC") (not $.Values.geoserver.sharedGWC) $.Values.gwcManage.imagepull }}
+        - name: {{ $.Release.Name }}-geoserver-gwcmanage-secret-imagepull
+        {{- end }}
+      {{- end }}
       initContainers:
         - name: {{ $.Release.Name }}-geocluster-init
           image: {{ $.Values.geoserver.image }}
-          imagePullPolicy: Always
+          imagePullPolicy: {{ $.Values.geoserver.imagePullPolicy | default "Always" }}
           command:
             - /geoserver/bin/init_geoserver
           env:
@@ -77,6 +97,9 @@ spec:
             {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            privileged: false
             capabilities:
               drop:
                 - ALL
@@ -127,9 +150,96 @@ spec:
             {{- end }}  
             {{- end }}
       containers:
+        {{- if and $.Values.gwcManage (hasKey $.Values.geoserver "sharedGWC") (not $.Values.geoserver.sharedGWC ) }}
+        - name: {{ $.Release.Name }}-geocluster-gwcmanager
+          image: {{ $.Values.gwcManage.image}}
+          imagePullPolicy: {{ $.Values.gwcManage.imagePullPolicy | default "Always" }}
+          {{- if hasKey $.Values.gwcManage "resources" }}
+          resources:
+{{ $.Values.gwcManage.resources | toYaml | indent 12 }}
+          {{- end }}
+          command:
+            - supercronic
+            - -quiet
+            - /etc/crontab
+          stdin: true
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          tty: true
+          env:
+            - name: RELEASE_TIME
+            {{- if eq ($.Values.gwcManage.releaseTime | default "")  "" }}
+              value: {{ now | date "2006-01-02T15:04:05" | quote }}
+            {{- else }}
+              value: {{ $.Values.gwcManage.releaseTime | quote }}
+            {{- end }}
+            - name: GEOSERVER_NAME
+              value: "localhost"
+            - name: GEOSERVER_URL
+              value: "http://localhost:{{ $.Values.geoserver.port | default 8080 }}/geoserver"
+            {{- range $key,$value := $.Values.gwcManage.envs | default dict }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          envFrom:
+            {{- range $name,$data := $.Values.gwcManage.secrets }}
+            - secretRef:
+                name: {{ $.Release.Name }}-geoserver-gwcmanage-secret-{{ $name }}
+                optional: false
+            {{- end }}
+            {{- range $name,$data := $.Values.gwcManage.configmaps }}
+            - configMapRef:
+                name: {{ $.Release.Name }}-geoserver-gwcmanage-configmap-{{ $name }}
+                optional: false
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            privileged: false
+            capabilities:
+              drop:
+                - ALL
+            {{- if hasKey $.Values.gwcManage "groupid" }}
+            runAsGroup: {{ $.Values.gwcManage.groupid }}
+            {{- end }}
+            {{- if hasKey $.Values.gwcManage "userid" }}
+            runAsUser: {{ $.Values.gwcManage.userid }}
+            runAsNonRoot: true
+            {{- else}}
+            runAsNonRoot: false
+            {{- end }}
+          workingDir: /app
+          volumeMounts:
+            - name: crontab-file
+              mountPath: "/etc/crontab"
+              subPath: "crontab"
+            {{- if $.Values.gwcManage.volume }}
+            - name: report-data
+              mountPath: {{ $.Values.gwcManage.volume.mountPath | default "/app/reports" }}
+            {{- end }}
+            {{- range $name,$config := $.Values.gwcManage.existingVolumes }}
+            {{- range $i,$mount := $config.mounts }}
+            - mountPath: {{ $mount.mountPath }}
+              name: {{ $name }}
+              {{- if hasKey $mount "subPath" }}
+              subPath: {{ $mount.subPath }}
+              {{- end }}
+            {{- end }}  
+            {{- end }}
+            {{- range $name,$config := $.Values.geoserver.volumeClaimTemplates }}
+            {{- range $i,$mount := $config.mounts }}
+            - mountPath: {{ $mount.mountPath }}
+              name: {{ $.Release.Name }}-geocluster-{{ $name }}
+              {{- if hasKey $mount "subPath" }}
+              subPath: {{ $mount.subPath }}
+              {{- end }}
+            {{- end }}  
+            {{- end }}
+        {{- end }}
         - name: {{ $.Release.Name }}-geocluster
           image: {{ $.Values.geoserver.image }}
-          imagePullPolicy: Always
+          imagePullPolicy: {{ $.Values.geoserver.imagePullPolicy | default "Always" }}
           command:
             - /geoserver/bin/start_geoserver
           stdin: true
@@ -188,11 +298,22 @@ spec:
             exec:
               command:
                 - /geoserver/bin/geoserver_startup
+          {{- if $nfsCount }}
+          readinessProbe:
+            failureThreshold: {{ $readinessProbe.failureThreshold | default 3 }}
+            successThreshold: {{ $readinessProbe.successThreshold | default 1 }}
+            initialDelaySeconds: {{ $readinessProbe.initialDelaySeconds | default 2 }}
+            timeoutSeconds: 3
+            periodSeconds: {{ $readinessProbe.periodSeconds | default 5 }}
+            exec:
+              command:
+                - /geoserver/bin/geoserver_readiness
+          {{- end }}
           livenessProbe:
             failureThreshold: 1
             successThreshold: 1
             initialDelaySeconds: {{ $livenessProbe.initialDelaySeconds | default 10 }}
-            timeoutSeconds: {{ ceil (addf (mulf (sub ($.Values.geoserver.replicas | default 1) 1) ($.Values.geoserver.liveCheckTimeout | default 0.5)) ($.Values.geoserver.liveCheckTimeout | default 0.5) 1) | int}}
+            timeoutSeconds: {{ ceil (addf (mulf (sub ($.Values.geoserver.replicas | default 1) 1) ($.Values.geoserver.liveCheckTimeout | default 0.5)) ($.Values.geoserver.liveCheckTimeout | default 0.5) 60) | int}}
             periodSeconds: {{ $livenessProbe.periodSeconds | default 10 }}
             exec:
               command:
@@ -203,6 +324,9 @@ spec:
           {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            privileged: false
             capabilities:
               drop:
                 - ALL
@@ -226,9 +350,18 @@ spec:
               mountPath: "/geoserver/bin"
             {{- if gt (len ($.Values.geoserver.customsettings | default list)) 0  }}
             {{- range $config := $.Values.geoserver.customsettings }}
+            {{- if and (hasKey $config "overwrite") (not $config.overwrite) }}
             - name: geoserver-customsettings
               mountPath: "/geoserver/customsettings/{{$config.mountPath}}"
               subPath: {{$config.name}}
+            {{- end }}  
+            {{- end }}  
+            {{- range $config := $.Values.geoserver.customsettings }}
+            {{- if or (not (hasKey $config "overwrite")) $config.overwrite }}
+            - name: geoserver-customsettings-readonly
+              mountPath: "/geoserver/customsettings-readonly/{{$config.mountPath}}"
+              subPath: {{$config.name}}
+            {{- end }}  
             {{- end }}  
             {{- end }}  
             {{- if $.Values.geoserverHealthcheck }}
@@ -270,6 +403,7 @@ spec:
       {{- if hasKey $.Values.geoserver "groupid" }}
       securityContext:
         fsGroup: {{ $.Values.geoserver.groupid }}
+        fsGroupChangePolicy: "OnRootMismatch"
       {{- end }}
       terminationGracePeriodSeconds: 30
       {{- if $.Values.geoserver.tolerations }}
@@ -308,6 +442,11 @@ spec:
           name: {{ $.Release.Name }}-geoserver-configmap-customsettings
           optional: false
           defaultMode: 0777
+      - name: geoserver-customsettings-readonly
+        configMap:
+          name: {{ $.Release.Name }}-geoserver-configmap-customsettings-readonly
+          optional: false
+          defaultMode: 0777
       {{- end }}
       {{- if $.Values.geoserverHealthcheck }}
       - name: report-data
@@ -336,6 +475,29 @@ spec:
         persistentVolumeClaim:
           claimName: {{ $config.claimName }}
           readOnly: {{ $config.readOnly | default "false" }}
+      {{- end }}
+      #Volumes for gwcmanager
+      {{- if and $.Values.gwcManage (hasKey $.Values.geoserver "sharedGWC") (not $.Values.geoserver.sharedGWC ) }}
+      - name: crontab-file
+        configMap:
+          name: {{ $.Release.Name }}-gwcmanage-configmap-crontab-file
+          optional: false
+          defaultMode: 0555
+        {{- if $.Values.gwcManage.volume }}
+      - name: report-data
+        persistentVolumeClaim:
+          claimName: {{ $.Release.Name }}-geoserver-gwcmanage-report-data
+        {{- end }}
+        {{- range $name,$config := $.Values.gwcManage.existingVolumes | default dict }}
+      - name: {{ $name }}
+        persistentVolumeClaim:
+            {{- if hasKey $config "relativeClaimName" }}
+          claimName: {{ $.Release.Name}}-{{ $config.relativeClaimName }}
+            {{- else }}
+          claimName: {{ $config.claimName }}
+            {{- end }}
+          readOnly: {{ $config.readOnly | default "false" }}
+        {{- end }}
       {{- end }}
   volumeClaimTemplates:
     {{- range $name,$config := $.Values.geoserver.volumeClaimTemplates }}
@@ -387,10 +549,19 @@ spec:
         workload.user.cattle.io/workloadselector: apps.{{ $.Release.Namespace}}-{{ $.Release.Name }}-geoclusteradmin
         workload.user.cattle.io/geoclusterselector: apps.{{ $.Release.Namespace}}-{{ $.Release.Name }}-geocluster
     spec:
+      {{- if or (hasKey $.Values.geoserver "imagepull") (and $.Values.gwcManage (hasKey $.Values.geoserver "sharedGWC") (not $.Values.geoserver.sharedGWC) $.Values.gwcManage.imagepull) }}
+      imagePullSecrets:
+        {{- if hasKey $.Values.geoserver "imagepull" }}
+        - name: {{ $.Release.Name }}-geoserver-secret-imagepull
+        {{- end }}
+        {{- if and $.Values.gwcManage (hasKey $.Values.geoserver "sharedGWC") (not $.Values.geoserver.sharedGWC) $.Values.gwcManage.imagepull }}
+        - name: {{ $.Release.Name }}-geoserver-gwcmanage-secret-imagepull
+        {{- end }}
+      {{- end }}
       initContainers:
         - name: {{ $.Release.Name }}-geoclusteradmin-init
           image: {{ $.Values.geoserver.image }}
-          imagePullPolicy: Always
+          imagePullPolicy: {{ $.Values.geoserver.imagePullPolicy | default "Always" }}
           command:
             - /geoserver/bin/init_geoserver
           env:
@@ -421,6 +592,9 @@ spec:
             {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            privileged: false
             capabilities:
               drop:
                 - ALL
@@ -471,9 +645,96 @@ spec:
             {{- end }}  
             {{- end }}
       containers:
+        {{- if and $.Values.gwcManage (hasKey $.Values.geoserver "sharedGWC") (not $.Values.geoserver.sharedGWC ) }}
+        - name: {{ $.Release.Name }}-geoclusteradmin-gwcmanager
+          image: {{ $.Values.gwcManage.image}}
+          imagePullPolicy: {{ $.Values.gwcManage.imagePullPolicy | default "Always" }}
+          {{- if hasKey $.Values.gwcManage "resources" }}
+          resources:
+{{ $.Values.gwcManage.resources | toYaml | indent 12 }}
+          {{- end }}
+          command:
+            - supercronic
+            - -quiet
+            - /etc/crontab
+          stdin: true
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          tty: true
+          env:
+            - name: RELEASE_TIME
+            {{- if eq ($.Values.gwcManage.releaseTime | default "")  "" }}
+              value: {{ now | date "2006-01-02T15:04:05" | quote }}
+            {{- else }}
+              value: {{ $.Values.gwcManage.releaseTime | quote }}
+            {{- end }}
+            - name: GEOSERVER_NAME
+              value: "localhost"
+            - name: GEOSERVER_URL
+              value: "http://localhost:{{ $.Values.geoserver.port | default 8080 }}/geoserver"
+            {{- range $key,$value := $.Values.gwcManage.envs | default dict }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          envFrom:
+            {{- range $name,$data := $.Values.gwcManage.secrets }}
+            - secretRef:
+                name: {{ $.Release.Name }}-geoserver-gwcmanage-secret-{{ $name }}
+                optional: false
+            {{- end }}
+            {{- range $name,$data := $.Values.gwcManage.configmaps }}
+            - configMapRef:
+                name: {{ $.Release.Name }}-geoserver-gwcmanage-configmap-{{ $name }}
+                optional: false
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            privileged: false
+            capabilities:
+              drop:
+                - ALL
+            {{- if hasKey $.Values.gwcManage "groupid" }}
+            runAsGroup: {{ $.Values.gwcManage.groupid }}
+            {{- end }}
+            {{- if hasKey $.Values.gwcManage "userid" }}
+            runAsUser: {{ $.Values.gwcManage.userid }}
+            runAsNonRoot: true
+            {{- else}}
+            runAsNonRoot: false
+            {{- end }}
+          workingDir: /app
+          volumeMounts:
+            - name: crontab-file
+              mountPath: "/etc/crontab"
+              subPath: "crontab"
+            {{- if $.Values.gwcManage.volume }}
+            - name: report-data
+              mountPath: {{ $.Values.gwcManage.volume.mountPath | default "/app/reports" }}
+            {{- end }}
+            {{- range $name,$config := $.Values.gwcManage.existingVolumes }}
+            {{- range $i,$mount := $config.mounts }}
+            - mountPath: {{ $mount.mountPath }}
+              name: {{ $name }}
+              {{- if hasKey $mount "subPath" }}
+              subPath: {{ $mount.subPath }}
+              {{- end }}
+            {{- end }}  
+            {{- end }}
+            {{- range $name,$config := $.Values.geoserver.adminVolumes }}
+            {{- range $i,$mount := $config.mounts }}
+            - mountPath: {{ $mount.mountPath }}
+              name: {{ $name }}
+              {{- if hasKey $mount "subPath" }}
+              subPath: {{ $mount.subPath }}
+              {{- end }}
+            {{- end }}  
+            {{- end }}
+        {{- end }}
         - name: {{ $.Release.Name }}-geoclusteradmin
           image: {{ $.Values.geoserver.image }}
-          imagePullPolicy: Always
+          imagePullPolicy: {{ $.Values.geoserver.imagePullPolicy | default "Always" }}
           command:
             - /geoserver/bin/start_geoserver
           stdin: true
@@ -530,11 +791,22 @@ spec:
             exec:
               command:
                 - /geoserver/bin/geoserver_startup
+          {{- if $nfsCount }}
+          readinessProbe:
+            failureThreshold: {{ $readinessProbe.failureThreshold | default 3 }}
+            successThreshold: {{ $readinessProbe.successThreshold | default 1 }}
+            initialDelaySeconds: {{ $readinessProbe.initialDelaySeconds | default 2 }}
+            timeoutSeconds: {{ $readinessProbe.timeoutSeconds | default 3 }}
+            periodSeconds: {{ $readinessProbe.periodSeconds | default 5 }}
+            exec:
+              command:
+                - /geoserver/bin/geoserver_readiness
+          {{- end }}
           livenessProbe:
             failureThreshold: 1
             successThreshold: 1
             initialDelaySeconds: {{ $livenessProbe.initialDelaySeconds | default 10 }}
-            timeoutSeconds: {{ ceil (addf ($.Values.geoserver.liveCheckTimeout | default 0.5) 1) | int}}
+            timeoutSeconds: {{ ceil (addf ($.Values.geoserver.liveCheckTimeout | default 0.5) 60) | int}}
             periodSeconds: {{ $livenessProbe.periodSeconds | default 10 }}
             exec:
               command:
@@ -549,6 +821,9 @@ spec:
           {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            privileged: false
             capabilities:
               drop:
                 - ALL
@@ -572,9 +847,18 @@ spec:
               mountPath: "/geoserver/bin"
             {{- if gt (len ($.Values.geoserver.customsettings | default list)) 0  }}
             {{- range $config := $.Values.geoserver.customsettings }}
+            {{- if and (hasKey $config "overwrite") (not $config.overwrite) }}
             - name: geoserver-customsettings
               mountPath: "/geoserver/customsettings/{{$config.mountPath}}"
               subPath: {{$config.name}}
+            {{- end }}  
+            {{- end }}  
+            {{- range $config := $.Values.geoserver.customsettings }}
+            {{- if or (not (hasKey $config "overwrite")) $config.overwrite }}
+            - name: geoserver-customsettings-readonly
+              mountPath: "/geoserver/customsettings-readonly/{{$config.mountPath}}"
+              subPath: {{$config.name}}
+            {{- end }}  
             {{- end }}  
             {{- end }}  
             {{- if $.Values.geoserverHealthcheck }}
@@ -625,6 +909,7 @@ spec:
       {{- if hasKey $.Values.geoserver "groupid" }}
       securityContext:
         fsGroup: {{ $.Values.geoserver.groupid }}
+        fsGroupChangePolicy: "OnRootMismatch"
       {{- end }}
       terminationGracePeriodSeconds: 30
       {{- if $.Values.geoserver.adminTolerations }}
@@ -655,6 +940,11 @@ spec:
       - name: geoserver-customsettings
         configMap:
           name: {{ $.Release.Name }}-geoserver-configmap-customsettings
+          optional: false
+          defaultMode: 0777
+      - name: geoserver-customsettings-readonly
+        configMap:
+          name: {{ $.Release.Name }}-geoserver-configmap-customsettings-readonly
           optional: false
           defaultMode: 0777
       {{- end }}

@@ -4,7 +4,7 @@
   <requireTiledParameter>true</requireTiledParameter>
   <WMSCEnabled>true</WMSCEnabled>
   <TMSEnabled>true</TMSEnabled>
-  <securityEnabled>false</securityEnabled>
+  <securityEnabled>true</securityEnabled>
   <innerCachingEnabled>false</innerCachingEnabled>
   <persistenceEnabled>true</persistenceEnabled>
   <cacheProviderClass>class org.geowebcache.storage.blobstore.memory.guava.GuavaCacheProvider</cacheProviderClass>
@@ -42,5 +42,5 @@
     <string>image/png</string>
     <string>image/jpeg</string>
   </defaultOtherCacheFormats>
-  <lockProviderName>fileLock</lockProviderName>
+  <lockProviderName>redisLock</lockProviderName>
 </GeoServerGWCConfig>

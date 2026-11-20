@@ -1,11 +1,14 @@
-{{- define "geoserver.can_restart" }}#!/bin/bash
-{{- $log_levels := dict "DISABLE" 0 "ERROR" 100 "WARNING" 200 "INFO" 300 "DEBUG" 400 }}
-{{- $log_levelname := upper ($.Values.geoserver.livenesslog | default "DISABLE") }}
+{{- define "geoserver.can_restart" }}
+# should called via source
+# will set the var 'canRetart' to 1 if can restart; otherwise set to 0
+{{- $log_levels := dict "DISABLED" 0 "ERROR" 100 "WARNING" 200 "INFO" 300 "DEBUG" 400 }}
+{{- $log_levelname := upper ($.Values.geoserver.livenesslog | default "DISABLED") }}
 {{- if not (hasKey $log_levels $log_levelname) }}
-{{- $log_levelname = "DISABLE" }}
+{{- $log_levelname = "DISABLED" }}
 {{- end }}
 {{- $log_level := (get $log_levels $log_levelname) | int }}
 
+canRestart=0
 if [[ -f ${GEOSERVER_DATA_DIR}/www/server/restartenabled ]]; then
   nextRestartSeconds=$(cat ${GEOSERVER_DATA_DIR}/www/server/nextrestarttime)
   now=$(date '+%Y-%m-%d %H:%M:%S')
